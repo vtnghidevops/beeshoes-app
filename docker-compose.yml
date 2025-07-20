@@ -1,9 +1,9 @@
 services:
   beeshoes-frontend:
     container_name: beeshoes-frontend
-    image: beeshoes-frontend:v1
+    image: tannghidevops/beeshoes:frontend-v1.0.0
     build:
-      context: ./bee-shoes-frontend
+      context: ./beeshoes-frontend
       args:
         - REACT_APP_API_URL=${REACT_APP_API_URL}
     ports:
@@ -15,9 +15,9 @@ services:
 
   beeshoes-backend:
     container_name: beeshoes-backend
-    image: beeshoes-backend:latest
+    image: tannghidevops/beeshoes:backend-v1.0.0
     build:
-      context: ./bee-shoes-backend
+      context: ./beeshoes-backend
     ports:
       - 50001:8080
     environment:
@@ -75,7 +75,7 @@ services:
 
   beeshoes-db-init:
     container_name: beeshoes-db-init
-    image: beeshoes-db-init:v1
+    image: tannghidevops/beeshoes:db-init-v1.0.0
     build:
       context: ./db
     environment:
