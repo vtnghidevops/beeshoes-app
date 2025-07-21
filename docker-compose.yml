@@ -1,11 +1,14 @@
 services:
   beeshoes-frontend:
     container_name: beeshoes-frontend
-    image: tannghidevops/beeshoes:frontend-v1.0.0
+    image: tannghidevops/beeshoes:frontend-v1.0.1
     build:
       context: ./beeshoes-frontend
       args:
         - REACT_APP_API_URL=${REACT_APP_API_URL}
+    environment:
+      - REACT_APP_API_URL=${REACT_APP_API_URL}
+      - REACT_APP_GHN_TOKEN=${REACT_APP_GHN_TOKEN}
     ports:
       - 50000:80
     depends_on:

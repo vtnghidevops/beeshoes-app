@@ -2,42 +2,26 @@ name: Backend Development Deployment
 
 on:
   pull_request:
-    branches: [ develop ]
+    branches: [ main ]
     paths:
     - 'beeshoes-backend/**'
-    - 'helm-chart/beeshoes-app/**'
-    - '.github/workflows/backend-dev.yml'
     types: [ closed ]
   push:
     tags:
     - 'backend-dev-*'
-    - 'backend-*'
-
-env:
-  REGISTRY: harbor.deploy.io.vn
-  IMAGE_NAME: beeshoes/beeshoes-backend
-  KUBE_NAMESPACE: beeshoes-dev
-  HELM_CHART_PATH: ./helm-chart/beeshoes-app
-  APP_NAME: beeshoes-backend
-  ENVIRONMENT: development
 
 jobs:
-  build-and-deploy:
+  build-image:
     name: Build and Deploy Backend to Development
     runs-on: ubuntu-latest
-
+    environment: dev
     # Only run on merged PRs or tag pushes
     if: |
       (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
-
-    environment:
-      name: development
-      url: https://beeshoes-dev.deploy.io.vn/api
-
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
+      commit-sha: ${{ steps.short-sha.outputs.short_sha }}
 
     steps:
     - name: Checkout code
@@ -45,83 +29,31 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'eclipse-temurin'
-        cache: 'maven'
-
-    - name: Cache Maven dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.m2/repository
-        key: ${{ runner.os }}-maven-${{ hashFiles('beeshoes-backend/pom.xml') }}
-        restore-keys: |
-          ${{ runner.os }}-maven-
-
-    - name: Validate Maven project
-      working-directory: beeshoes-backend
-      run: |
-        mvn validate
-        mvn dependency:resolve-sources
-
-    - name: Run unit tests
-      working-directory: beeshoes-backend
-      run: |
-        mvn test -Dspring.profiles.active=test
-      env:
-        SPRING_PROFILES_ACTIVE: test
-
-    - name: Generate test reports
-      working-directory: beeshoes-backend
-      run: |
-        mvn surefire-report:report
-      continue-on-error: true
-
-    - name: Build application
-      working-directory: beeshoes-backend
-      run: |
-        mvn clean compile -DskipTests=true
-        mvn package -DskipTests=true
-      env:
-        MAVEN_OPTS: "-Xmx2048m -XX:MaxMetaspaceSize=512m"
-
-    - name: Verify JAR file
-      working-directory: beeshoes-backend
-      run: |
-        ls -la target/
-        file target/bee-shoes-backend-*.jar
-        java -jar target/bee-shoes-backend-*.jar --version 2>/dev/null || echo "JAR verification completed"
-
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
       with:
         platforms: linux/amd64,linux/arm64
 
-    - name: Login to Harbor Registry
+    - name: Generate short commit hash
+      id: short-sha
+      run: echo "short_sha=${GITHUB_SHA:0:5}" >> $GITHUB_OUTPUT
+
+    - name: Login to Docker Registry
       uses: docker/login-action@v3
       with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ secrets.HARBOR_USERNAME }}
-        password: ${{ secrets.HARBOR_PASSWORD }}
+        registry: ${{ secrets.REGISTRY }}
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        images: ${{ secrets.REGISTRY }}/${{ secrets.REPO_NAME }}
         tags: |
-          type=ref,event=branch,prefix={{branch}}-
-          type=ref,event=pr,prefix=pr-{{pr}}-
-          type=ref,event=tag
-          type=sha,prefix={{branch}}-{{sha}}-
-          type=raw,value=dev-latest
-        labels: |
-          org.opencontainers.image.title=BeeShoes Backend
-          org.opencontainers.image.description=Spring Boot API for BeeShoes e-commerce
-          org.opencontainers.image.vendor=BeeShoes Team
-          maintainer=devops@beeshoes.com
+          type=raw,value=backend-${{ github.ref_name }}-${{ steps.short-sha.outputs.short_sha }}
+        flavor: |
+          latest=false
 
     - name: Build and push Docker image
       id: build
@@ -131,39 +63,27 @@ jobs:
         file: ./beeshoes-backend/Dockerfile
         platforms: linux/amd64,linux/arm64
         push: true
-        tags: ${{ steps.meta.outputs.tags }}
+        tags: ${{ secrets.REGISTRY }}/${{ secrets.REPO_NAME }}:${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
-        build-args: |
-          BUILDKIT_INLINE_CACHE=1
-          SPRING_PROFILES_ACTIVE=production
 
-    - name: Install Helm
-      uses: azure/setup-helm@v4
-      with:
-        version: '3.14.0'
-
-    - name: Configure kubectl
-      uses: azure/k8s-set-context@v4
-      with:
-        method: kubeconfig
-        kubeconfig: ${{ secrets.KUBE_CONFIG_DEV }}
-
-    - name: Create namespace if not exists
+  deploy-to-helm-chart:
+    name: Update Helm Chart Repository
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+    - name: Update Helm Chart Repository
+      needs: build-image
       run: |
-        kubectl create namespace ${{ env.KUBE_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+        # Set image tag for deployment
+        IMAGE_TAG=${{ needs.build-image.outputs.image-tag }}
 
-          - name: Update Helm Chart Repository
-        run: |
-          # Extract image tag for deployment
-          IMAGE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1 | cut -d':' -f2)
-          
-          echo "🔄 Updating Helm Chart Repository with new backend image tag: ${IMAGE_TAG}"
+        echo "Updating Helm Chart Repository with new backend image tag: ${IMAGE_TAG}"
           
           # Clone helm chart repository
-          git clone https://${{ secrets.HELM_CHART_TOKEN }}@github.com/${{ secrets.HELM_CHART_REPO_OWNER }}/${{ secrets.HELM_CHART_REPO_NAME }}.git helm-chart-repo
-          cd helm-chart-repo
+          git clone https://${{ secrets.HELM_CHAR_TOKEN }}@github.com/${{ secrets.HELM_CHAR_USERNAME }}/${{ secrets.HELM_CHAR_REPO }}.git
+          cd ${HELM_REPO}
           
           # Configure git
           git config user.email "${{ secrets.GIT_EMAIL }}"
@@ -171,64 +91,17 @@ jobs:
           
           # Update backend image tag in dev values file
           if command -v yq &> /dev/null; then
-            yq eval '.backend.image.tag = "'${IMAGE_TAG}'"' -i charts/beeshoes-app/values-dev.yaml
+            yq eval '.backend.image.tag = "'${IMAGE_TAG}'"' -i envs/dev/dev-values.yaml
           else
             # Fallback to sed if yq not available
-            sed -i "s|backend:\s*image:\s*tag:.*|backend:\n  image:\n    tag: \"${IMAGE_TAG}\"|g" charts/beeshoes-app/values-dev.yaml
+            sed -i "s|backend:\s*image:\s*tag:.*|backend:\n   image:\n     tag: \"${IMAGE_TAG}\"|g" envs/dev/dev-values.yaml
           fi
           
           # Commit and push changes
-          git add charts/beeshoes-app/values-dev.yaml
-          git commit -m "feat(backend): update dev image tag to ${IMAGE_TAG} from commit ${{ github.sha }}"
+          git add envs/dev/dev-values.yaml
+          git commit -m "feat(backend): update dev image tag to ${IMAGE_TAG} from commit ${{ needs.build-image.outputs.commit-sha }}"
           git push origin main
           
-          echo "✅ Successfully updated helm chart repository with backend image tag: ${IMAGE_TAG}"
+          echo "Successfully updated helm chart repository with backend image tag: ${IMAGE_TAG}"
 
-    - name: Verify deployment
-      run: |
-        kubectl rollout status deployment/beeshoes-be-deployment -n ${{ env.KUBE_NAMESPACE }} --timeout=600s
-        kubectl get pods -n ${{ env.KUBE_NAMESPACE }} -l app=beeshoes-be
-        kubectl get services -n ${{ env.KUBE_NAMESPACE }} -l app=beeshoes-be
-
-    - name: Wait for application startup
-      run: |
-        echo "Waiting for Spring Boot application to start..."
-        for i in {1..20}; do
-          if kubectl exec -n ${{ env.KUBE_NAMESPACE }} deployment/beeshoes-be-deployment -- curl -f http://localhost:8080/actuator/health 2>/dev/null; then
-            echo "✅ Application is healthy"
-            break
-          fi
-          echo "Waiting for application startup... ($i/20)"
-          sleep 15
-        done
-
-    - name: Run API health checks
-      run: |
-        # Get the service IP and test API endpoints
-        kubectl port-forward -n ${{ env.KUBE_NAMESPACE }} svc/beeshoes-be-service 8080:8080 &
-        PF_PID=$!
-        sleep 10
-
-        # Test health endpoints
-        curl -f http://localhost:8080/actuator/health || exit 1
-        curl -f http://localhost:8080/actuator/info || exit 1
-
-        # Kill port-forward
-        kill $PF_PID
-        echo "✅ Backend API deployed successfully to development environment"
-
-    - name: Cleanup old images
-      run: |
-        # Keep only the latest 5 images to save registry space
-        docker image prune -f
-      continue-on-error: true
-
-    - name: Post deployment summary
-      run: |
-        echo "🚀 Backend Development Deployment Summary:"
-        echo "📦 Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
-        echo "🌍 Environment: Development"
-        echo "🔗 API URL: https://beeshoes-dev.deploy.io.vn/api"
-        echo "📊 Namespace: ${{ env.KUBE_NAMESPACE }}"
-        echo "🏥 Health: https://beeshoes-dev.deploy.io.vn/api/actuator/health"
-        echo "⏰ Deployed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" 
+   
